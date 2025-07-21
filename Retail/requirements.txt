@@ -1,0 +1,6 @@
+dtlpy
+pandas
+numpy
+Pillow
+opencv-python
+pathlib 
