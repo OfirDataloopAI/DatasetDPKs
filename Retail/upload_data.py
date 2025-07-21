@@ -40,8 +40,8 @@ def merge_masks(masks_dir, mask_filename):
     return merged_mask
 
 
-def upload_data(dataset, extracted_data_path, binaries_path):
-    """Upload RetailGaze data to Dataloop dataset following the step-by-step plan."""
+def upload_data(dataset, extracted_data_path, binaries_path, samples_per_dir=5):
+    """Upload RetailGaze data to Dataloop dataset with sampling from each directory."""
     
     # Step 1: Read all the train images paths and their annotations
     print("📖 Step 1: Reading training data and annotations...")
@@ -55,9 +55,34 @@ def upload_data(dataset, extracted_data_path, binaries_path):
     df = pd.read_csv(csv_path)
     print(f"✅ Loaded {len(df)} training samples")
     
+    # Group by directory (first part of filename path)
+    print(f"🗂️ Grouping images by directory...")
+    df['directory'] = df['filename'].str.split('/').str[0]
+    
+    # Sample approximately 5 images from each directory
+    sampled_dfs = []
+    directories = df['directory'].unique()
+    
+    print(f"📁 Found {len(directories)} unique directories")
+    
+    for directory in directories:
+        dir_df = df[df['directory'] == directory]
+        # Take up to samples_per_dir images from this directory
+        sampled_dir_df = dir_df.head(samples_per_dir)
+        sampled_dfs.append(sampled_dir_df)
+        print(f"  📂 {directory}: {len(dir_df)} images → sampling {len(sampled_dir_df)}")
+    
+    # Combine all sampled data
+    df_sampled = pd.concat(sampled_dfs, ignore_index=True)
+    
+    print(f"\n🎯 Final sample: {len(df_sampled)} images from {len(directories)} directories")
+    print(f"📊 Reduction: {len(df)} → {len(df_sampled)} images ({len(df_sampled)/len(df)*100:.1f}%)")
+    
+    success_count = 0
+    
     # Process each image
-    for idx, row in df.iterrows():
-        print(f"\n🔄 Processing image {idx + 1}/{len(df)}: {row['filename']}")
+    for idx, row in df_sampled.iterrows():
+        print(f"\n🔄 Processing image {idx + 1}/{len(df_sampled)}: {row['filename']}")
         
         # Construct image path
         image_path = os.path.join(binaries_path, row['filename'])
@@ -97,27 +122,33 @@ def upload_data(dataset, extracted_data_path, binaries_path):
             
             # Step 5: Merge masks and add segmentation (dl.Segmentation)
             print(f"🎭 Step 5: Processing segmentation masks...")
-            mask_dir = os.path.join(binaries_path, os.path.dirname(row['seg_mask']).replace('/', os.sep))
             
-            if os.path.exists(mask_dir):
-                # Merge all masks in the directory
-                merged_mask = merge_masks(mask_dir, row['seg_mask'])
-                
-                if merged_mask is not None:
-                    segmentation = dl.Segmentation(
-                        geo=merged_mask,
-                        label='gazed_object'
-                    )
-                    builder.add(annotation_definition=segmentation)
-                else:
-                    print(f"⚠ Could not process masks in {mask_dir}")
+            # Check if seg_mask is NaN or empty
+            if pd.isna(row['seg_mask']) or row['seg_mask'] == '' or row['seg_mask'] is None:
+                print(f"⚠ seg_mask is NaN/empty for {row['filename']}, skipping segmentation")
             else:
-                print(f"⚠ Mask directory not found: {mask_dir}")
+                mask_dir = os.path.join(binaries_path, os.path.dirname(row['seg_mask']).replace('/', os.sep))
+                
+                if os.path.exists(mask_dir):
+                    # Merge all masks in the directory
+                    merged_mask = merge_masks(mask_dir, row['seg_mask'])
+                    
+                    if merged_mask is not None:
+                        segmentation = dl.Segmentation(
+                            geo=merged_mask,
+                            label='gazed_object'
+                        )
+                        builder.add(annotation_definition=segmentation)
+                    else:
+                        print(f"⚠ Could not process masks in {mask_dir}")
+                else:
+                    print(f"⚠ Mask directory not found: {mask_dir}")
             
             # Upload all annotations
             print(f"📤 Uploading annotations...")
             item.annotations.upload(builder)
             print(f"✅ Annotations uploaded for {row['filename']}")
+            success_count += 1
             
         except Exception as e:
             print(f"❌ Error processing {row['filename']}: {str(e)}")
@@ -126,7 +157,9 @@ def upload_data(dataset, extracted_data_path, binaries_path):
     # Step 6: Profit! 🎉
     print(f"\n🎉 Step 6: Profit! Upload complete!")
     print(f"📊 Dataset: {dataset.name}")
-    print(f"📁 Total items processed: {len(df)}")
+    print(f"✅ Successfully processed: {success_count}/{len(df_sampled)} samples")
+    print(f"📁 Directories covered: {len(directories)}")
+    print(f"📈 Average samples per directory: {len(df_sampled)/len(directories):.1f}")
 
 
 def main():
@@ -137,10 +170,12 @@ def main():
     extracted_data_path = str(folder_root_path.joinpath("RetailGaze_V2_seg/extracted_data"))
     binaries_path = str(folder_root_path.joinpath("RetailGaze_V2_seg/RetailGaze_V2"))
     
+    # Upload ~5 samples from each directory
     upload_data(
         dataset=dataset,
         extracted_data_path=extracted_data_path,
         binaries_path=binaries_path,
+        samples_per_dir=5  # Adjust this number as needed
     )
 
 

@@ -39,11 +39,11 @@ def merge_masks(masks_dir, mask_filename):
     return merged_mask
 
 
-def upload_data_test(dataset, extracted_data_path, binaries_path, max_samples=5):
-    """TEST VERSION: Upload only first few RetailGaze samples for testing."""
+def upload_data_test(dataset, extracted_data_path, binaries_path, samples_per_dir=2, max_directories=3):
+    """TEST VERSION: Upload samples from first few directories for testing."""
     
     # Step 1: Read all the train images paths and their annotations
-    print("🧪 TEST MODE: Processing only first 5 samples...")
+    print("🧪 TEST MODE: Sampling from first few directories...")
     print("📖 Step 1: Reading training data and annotations...")
     csv_path = os.path.join(extracted_data_path, "RetailGaze_V3_2_train.csv")
     
@@ -53,15 +53,34 @@ def upload_data_test(dataset, extracted_data_path, binaries_path, max_samples=5)
     
     # Load annotations data
     df = pd.read_csv(csv_path)
-    # Limit to first few samples for testing
-    df = df.head(max_samples)
-    print(f"✅ Loaded {len(df)} training samples (TEST MODE)")
+    print(f"✅ Loaded {len(df)} training samples")
+    
+    # Group by directory (first part of filename path)
+    print(f"🗂️ Grouping images by directory...")
+    df['directory'] = df['filename'].str.split('/').str[0]
+    
+    # Sample from first few directories only for testing
+    directories = df['directory'].unique()[:max_directories]  # Take first few directories
+    print(f"📁 Testing with {len(directories)} directories: {list(directories)}")
+    
+    sampled_dfs = []
+    for directory in directories:
+        dir_df = df[df['directory'] == directory]
+        # Take up to samples_per_dir images from this directory
+        sampled_dir_df = dir_df.head(samples_per_dir)
+        sampled_dfs.append(sampled_dir_df)
+        print(f"  📂 {directory}: {len(dir_df)} images → sampling {len(sampled_dir_df)}")
+    
+    # Combine all sampled data
+    df_sampled = pd.concat(sampled_dfs, ignore_index=True)
+    
+    print(f"\n🎯 TEST sample: {len(df_sampled)} images from {len(directories)} directories")
     
     success_count = 0
     
     # Process each image
-    for idx, row in df.iterrows():
-        print(f"\n🔄 Processing TEST image {idx + 1}/{len(df)}: {row['filename']}")
+    for idx, row in df_sampled.iterrows():
+        print(f"\n🔄 Processing TEST image {idx + 1}/{len(df_sampled)}: {row['filename']}")
         
         # Construct image path
         image_path = os.path.join(binaries_path, row['filename'])
@@ -101,38 +120,28 @@ def upload_data_test(dataset, extracted_data_path, binaries_path, max_samples=5)
             
             # Step 5: Merge masks and add segmentation (dl.Segmentation)
             print(f"🎭 Step 5: Processing segmentation masks...")
-            mask_dir = os.path.join(binaries_path, os.path.dirname(row['seg_mask']).replace('/', os.sep))
             
-            if os.path.exists(mask_dir):
-                # Merge all masks in the directory
-                merged_mask = merge_masks(mask_dir, row['seg_mask'])
-                
-                if merged_mask is not None:
-                    # Convert mask to polygon format for Dataloop
-                    contours, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    
-                    polygon_count = 0
-                    for contour in contours:
-                        if len(contour) >= 3:  # Need at least 3 points for polygon
-                            # Convert contour to list of points
-                            polygon_points = []
-                            for point in contour:
-                                x, y = point[0]
-                                polygon_points.extend([float(x), float(y)])
-                            
-                            if len(polygon_points) >= 6:  # At least 3 points (6 coordinates)
-                                segmentation = dl.Polygon(
-                                    geo=polygon_points,
-                                    label='gazed_object'
-                                )
-                                builder.add(annotation_definition=segmentation)
-                                polygon_count += 1
-                    
-                    print(f"  Added {polygon_count} segmentation polygons")
-                else:
-                    print(f"⚠ Could not process masks in {mask_dir}")
+            # Check if seg_mask is NaN or empty
+            if pd.isna(row['seg_mask']) or row['seg_mask'] == '' or row['seg_mask'] is None:
+                print(f"⚠ seg_mask is NaN/empty for {row['filename']}, skipping segmentation")
             else:
-                print(f"⚠ Mask directory not found: {mask_dir}")
+                mask_dir = os.path.join(binaries_path, os.path.dirname(row['seg_mask']).replace('/', os.sep))
+                
+                if os.path.exists(mask_dir):
+                    # Merge all masks in the directory
+                    merged_mask = merge_masks(mask_dir, row['seg_mask'])
+                    
+                    if merged_mask is not None:
+                        merged_mask = np.where(merged_mask > 0, 1, 0)
+                        segmentation = dl.Segmentation(
+                            geo=merged_mask,
+                            label='gazed_object'
+                        )
+                        builder.add(annotation_definition=segmentation)
+                    else:
+                        print(f"⚠ Could not process masks in {mask_dir}")
+                else:
+                    print(f"⚠ Mask directory not found: {mask_dir}")
             
             # Upload all annotations
             print(f"📤 Uploading annotations...")
@@ -147,23 +156,25 @@ def upload_data_test(dataset, extracted_data_path, binaries_path, max_samples=5)
     # Step 6: Profit! 🎉
     print(f"\n🎉 Step 6: Test Complete!")
     print(f"📊 Dataset: {dataset.name}")
-    print(f"✅ Successfully processed: {success_count}/{len(df)} samples")
-    print(f"📁 Total items processed in TEST MODE: {len(df)}")
+    print(f"✅ Successfully processed: {success_count}/{len(df_sampled)} samples")
+    print(f"📁 Directories tested: {len(directories)}")
 
 
 def main():
-    dataset_id = "64b800000000000000000000"
+    dataset_id = "687e43853715c705e1b03bfc"
     dataset = dl.datasets.get(dataset_id=dataset_id)
 
-    extracted_data_path = "RetailGaze_V2_seg/extracted_data"
-    binaries_path = "RetailGaze_V2_seg/RetailGaze_V2"
+    folder_root_path = Path(__file__).parent
+    extracted_data_path = str(folder_root_path.joinpath("RetailGaze_V2_seg/extracted_data"))
+    binaries_path = str(folder_root_path.joinpath("RetailGaze_V2_seg/RetailGaze_V2"))
     
-    # Test with first 5 samples
+    # Test with 2 samples from each of the first 3 directories
     upload_data_test(
         dataset=dataset,
         extracted_data_path=extracted_data_path,
         binaries_path=binaries_path,
-        max_samples=5
+        samples_per_dir=2,  # 2 samples per directory for testing
+        max_directories=3   # Test only first 3 directories
     )
 
 
